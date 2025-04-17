@@ -1,254 +1,228 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
+/// <summary>
+/// Controls a hexapod's movement and gait patterns
+/// </summary>
 public class HexapodController : MonoBehaviour
 {
-    // Global variables for position and rotation as requested
-    public static Vector3 GlobalPosition;
-    public static Quaternion GlobalRotation;
+    [Header("Legs")]
+    public HexapodLeg[] legs;
 
-    // Hexapod configuration
-    public float bodyRadius = 1.0f;
-    public float bodyHeight = 0.2f;
-    public float legLength = 1.5f;
-    public float legWidth = 0.1f;
+    [Header("Movement Parameters")]
+    public float moveSpeed = 1.5f;
+    public float turnSpeed = 60.0f;
+    public float stepHeight = 0.25f;
 
-    // Movement settings
-    public float moveSpeed = 3.0f;
-    public float rotateSpeed = 60.0f;
+    [Header("Gait Settings")]
+    public float gaitCycleTime = 0.8f;
+    public enum GaitType { Tripod, Wave, Ripple }
+    public GaitType currentGait = GaitType.Tripod;
 
-    // Leg animation settings
-    public float legAnimationSpeed = 3.0f;
-    public float legLiftHeight = 0.3f;
-    public float stepSize = 0.5f;
+    // Leg groups for different gaits
+    private HexapodLeg[][] legGroups;
 
-    // Components
-    private GameObject baseBody;
-    private GameObject[] legs = new GameObject[6];
-    private GameObject[] upperLegs = new GameObject[6];
-    private GameObject[] lowerLegs = new GameObject[6];
-
-    // Leg animation state
-    private float animationTime = 0f;
+    private float cycleTimer = 0f;
     private Vector3 lastPosition;
     private Quaternion lastRotation;
     private bool isMoving = false;
 
-    // Start is called before the first frame update
     void Start()
     {
-        // Initialize global position and rotation
-        GlobalPosition = transform.position;
-        GlobalRotation = transform.rotation;
-        lastPosition = transform.position;
-        lastRotation = transform.rotation;
-
-        // Create hexapod
-        CreateHexapod();
-    }
-
-    // Update is called once per frame
-    void Update()
-    {
-        // Handle input
-        HandleInput();
-
-        // Update global variables
-        GlobalPosition = transform.position;
-        GlobalRotation = transform.rotation;
-
-        // Check if the hexapod is moving
-        isMoving = (Vector3.Distance(transform.position, lastPosition) > 0.001f ||
-                   Quaternion.Angle(transform.rotation, lastRotation) > 0.1f);
-
-        // Update leg animations
-        if (isMoving)
+        if (legs == null || legs.Length != 6)
         {
-            animationTime += Time.deltaTime * legAnimationSpeed;
-            AnimateLegs();
+            Debug.LogError("Hexapod requires exactly 6 legs");
+            return;
         }
 
-        // Update all child transforms based on global position and rotation
-        UpdateChildTransforms();
+        // Set up the leg groups based on the current gait
+        SetupLegGroups();
+
+        lastPosition = transform.position;
+        lastRotation = transform.rotation;
+    }
+
+    void Update()
+    {
+        // Get input for movement
+        float forward = Input.GetAxis("Vertical");
+        float turn = Input.GetAxis("Horizontal");
+
+        // Move the hexapod body
+        isMoving = Mathf.Abs(forward) > 0.1f || Mathf.Abs(turn) > 0.1f;
+        Move(forward, turn);
+
+        // Update the leg positions based on movement
+        UpdateLegs();
+    }
+
+    /// <summary>
+    /// Sets up leg groups based on the selected gait pattern
+    /// </summary>
+    private void SetupLegGroups()
+    {
+        switch (currentGait)
+        {
+            case GaitType.Tripod:
+                // Two groups of three legs each (tripod gait)
+                legGroups = new HexapodLeg[2][];
+                legGroups[0] = new HexapodLeg[] { legs[0], legs[3], legs[4] }; // FR, ML, RR
+                legGroups[1] = new HexapodLeg[] { legs[1], legs[2], legs[5] }; // FL, MR, RL
+                break;
+
+            case GaitType.Wave:
+                // Six groups of one leg each (wave gait)
+                legGroups = new HexapodLeg[6][];
+                for (int i = 0; i < 6; i++)
+                {
+                    legGroups[i] = new HexapodLeg[] { legs[i] };
+                }
+                break;
+
+            case GaitType.Ripple:
+                // Three groups of two legs each (ripple gait)
+                legGroups = new HexapodLeg[3][];
+                legGroups[0] = new HexapodLeg[] { legs[0], legs[3] }; // FR, ML
+                legGroups[1] = new HexapodLeg[] { legs[4], legs[1] }; // RR, FL
+                legGroups[2] = new HexapodLeg[] { legs[2], legs[5] }; // MR, RL
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Changes the current gait pattern
+    /// </summary>
+    public void ChangeGait(GaitType newGait)
+    {
+        if (currentGait != newGait)
+        {
+            currentGait = newGait;
+            SetupLegGroups();
+            cycleTimer = 0f; // Reset the cycle timer
+        }
+    }
+
+    /// <summary>
+    /// Moves and rotates the hexapod based on input
+    /// </summary>
+    void Move(float forward, float turn)
+    {
+        // Rotate the hexapod
+        transform.Rotate(0, turn * turnSpeed * Time.deltaTime, 0);
+
+        // Move the hexapod forward/backward
+        Vector3 moveDirection = transform.forward * forward * moveSpeed * Time.deltaTime;
+        transform.position += moveDirection;
+    }
+
+    /// <summary>
+    /// Updates all leg positions based on the current gait pattern
+    /// </summary>
+    void UpdateLegs()
+    {
+        // Update gait cycle timer
+        if (isMoving)
+        {
+            cycleTimer += Time.deltaTime;
+            if (cycleTimer > gaitCycleTime)
+            {
+                cycleTimer -= gaitCycleTime;
+            }
+        }
+
+        // Calculate movement since last frame
+        Vector3 positionDelta = transform.position - lastPosition;
+        Quaternion rotationDelta = transform.rotation * Quaternion.Inverse(lastRotation);
+
+        // Get the number of groups based on the current gait
+        int numGroups = legGroups.Length;
+
+        // Update each leg group
+        for (int i = 0; i < numGroups; i++)
+        {
+            // Calculate which phase this group should be in
+            float phaseOffset = (float)i / numGroups;
+            float groupPhase = (cycleTimer / gaitCycleTime + phaseOffset) % 1.0f;
+
+            // Determine if this group is in stance or swing phase
+            bool isStance = groupPhase >= 0.5f;
+
+            // Update the leg group
+            UpdateLegGroup(legGroups[i], isStance, positionDelta, rotationDelta, groupPhase);
+        }
 
         // Store current position and rotation for next frame
         lastPosition = transform.position;
         lastRotation = transform.rotation;
     }
 
-    // Create the hexapod (body and legs)
-    void CreateHexapod()
+    /// <summary>
+    /// Updates a group of legs based on their current phase in the gait cycle
+    /// </summary>
+    void UpdateLegGroup(HexapodLeg[] group, bool isStance, Vector3 positionDelta, Quaternion rotationDelta, float groupPhase)
     {
-        // Create body
-        baseBody = new GameObject("HexapodBody");
-        baseBody.transform.parent = transform;
-        baseBody.transform.localPosition = Vector3.zero;
-
-        // Create hexagonal base using cylinder
-        GameObject body = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        body.transform.parent = baseBody.transform;
-        body.transform.localPosition = Vector3.zero;
-        body.transform.localScale = new Vector3(bodyRadius * 2, bodyHeight, bodyRadius * 2);
-        body.GetComponent<Renderer>().material.color = Color.gray;
-
-        // Add direction indicator
-        GameObject indicator = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        indicator.transform.parent = baseBody.transform;
-        indicator.transform.localPosition = new Vector3(0, 0, bodyRadius * 0.8f);
-        indicator.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
-        indicator.GetComponent<Renderer>().material.color = Color.red;
-
-        // Create legs
-        for (int i = 0; i < 6; i++)
+        foreach (HexapodLeg leg in group)
         {
-            float angle = i * 60f * Mathf.Deg2Rad;
-            Vector3 legPosition = new Vector3(
-                Mathf.Cos(angle) * bodyRadius,
-                0,
-                Mathf.Sin(angle) * bodyRadius
-            );
+            Vector3 defaultPos = leg.GetDefaultFootPosition();
 
-            legs[i] = new GameObject("Leg" + i);
-            legs[i].transform.parent = baseBody.transform;
-            legs[i].transform.localPosition = legPosition;
+            if (isMoving)
+            {
+                if (isStance)
+                {
+                    // Stance phase - foot stays on ground (move opposite to body)
+                    Vector3 worldDefaultPos = transform.TransformPoint(defaultPos);
 
-            // Create leg segments (upper and lower)
-            upperLegs[i] = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            upperLegs[i].name = "UpperLeg" + i;
-            upperLegs[i].transform.parent = legs[i].transform;
-            upperLegs[i].transform.localPosition = new Vector3(0, -legLength * 0.25f, 0);
-            upperLegs[i].transform.localScale = new Vector3(legWidth, legLength * 0.5f, legWidth);
-            upperLegs[i].GetComponent<Renderer>().material.color = Color.blue;
+                    // Apply inverse of body movement to foot
+                    Vector3 stancePos = transform.InverseTransformPoint(worldDefaultPos - positionDelta);
+                    leg.SetFootPosition(stancePos);
+                }
+                else
+                {
+                    // Swing phase - foot moves forward along an arc
+                    float swingPhase = (groupPhase * 2.0f) % 1.0f; // Normalize to 0-1 range
 
-            lowerLegs[i] = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            lowerLegs[i].name = "LowerLeg" + i;
-            lowerLegs[i].transform.parent = upperLegs[i].transform;
-            lowerLegs[i].transform.localPosition = new Vector3(0, -legLength * 0.5f, 0);
-            lowerLegs[i].transform.localScale = new Vector3(legWidth * 0.8f, legLength * 0.5f, legWidth * 0.8f);
-            lowerLegs[i].GetComponent<Renderer>().material.color = Color.green;
+                    // Calculate forward movement direction based on overall movement
+                    Vector3 movementDir = positionDelta.normalized;
+                    if (movementDir.magnitude < 0.001f)
+                    {
+                        movementDir = transform.forward; // Default to forward if not moving
+                    }
 
-            // Point legs outward and downward
-            legs[i].transform.LookAt(transform.position + new Vector3(
-                Mathf.Cos(angle) * 10,
-                -5,  // Point slightly downward
-                Mathf.Sin(angle) * 10
-            ));
+                    // Scale the stride length based on movement speed
+                    float strideLength = moveSpeed * gaitCycleTime * 0.5f;
+                    Vector3 forwardOffset = movementDir * strideLength;
+
+                    // Calculate swing trajectory
+                    Vector3 startPos = transform.InverseTransformPoint(transform.TransformPoint(defaultPos) - forwardOffset);
+                    Vector3 endPos = defaultPos;
+
+                    // Interpolate between start and end positions
+                    Vector3 swingPos = Vector3.Lerp(startPos, endPos, swingPhase);
+
+                    // Add height using a sine curve for natural arc
+                    swingPos.y += Mathf.Sin(swingPhase * Mathf.PI) * stepHeight;
+
+                    leg.SetFootPosition(swingPos);
+                }
+            }
+            else
+            {
+                // Not moving, just keep feet at default positions
+                leg.SetFootPosition(defaultPos);
+            }
+
+            // Update IK for this leg
+            leg.SolveIK();
         }
     }
 
-    // Handle user input for movement
-    void HandleInput()
+    /// <summary>
+    /// Adjust the positions of the legs to match terrain
+    /// </summary>
+    public void AdaptToTerrain()
     {
-        // Movement (WASD or arrow keys)
-        float horizontal = Input.GetAxis("Horizontal");
-        float vertical = Input.GetAxis("Vertical");
-
-        // Calculate movement in local space
-        Vector3 movement = new Vector3(horizontal, 0, vertical) * moveSpeed * Time.deltaTime;
-        transform.Translate(movement);
-
-        // Rotation (Q and E keys)
-        if (Input.GetKey(KeyCode.Q))
+        foreach (HexapodLeg leg in legs)
         {
-            transform.Rotate(0, -rotateSpeed * Time.deltaTime, 0);
+            leg.AdaptToGround();
         }
-        if (Input.GetKey(KeyCode.E))
-        {
-            transform.Rotate(0, rotateSpeed * Time.deltaTime, 0);
-        }
-    }
-
-    // Animate the legs in a tripod gait
-    void AnimateLegs()
-    {
-        // Tripod gait - legs 0, 2, 4 move together, and legs 1, 3, 5 move together
-        for (int i = 0; i < 6; i++)
-        {
-            // Determine if this leg is in group 1 (even indices) or group 2 (odd indices)
-            bool isGroup1 = (i % 2 == 0);
-
-            // Calculate phase offset (0 to 1)
-            float phase = isGroup1 ? (animationTime % 1.0f) : ((animationTime + 0.5f) % 1.0f);
-
-            // Create leg movement cycle
-            AnimateLeg(i, phase);
-        }
-    }
-
-    // Animate a single leg based on phase (0 to 1)
-    void AnimateLeg(int legIndex, float phase)
-    {
-        // During the first half of the phase, the leg is lifting and moving forward
-        // During the second half, the leg is on the ground and pushing backward
-
-        if (phase < 0.5f)
-        {
-            // Lifting and moving forward (normalized 0 to 1 for this motion)
-            float liftPhase = phase * 2f;
-
-            // Sin curve for smooth up and down motion
-            float liftHeight = Mathf.Sin(liftPhase * Mathf.PI) * legLiftHeight;
-
-            // Forward-back motion
-            float swingAngle = Mathf.Lerp(30f, -30f, liftPhase) * Mathf.Deg2Rad;
-
-            // Apply rotations to upper and lower leg joints
-            upperLegs[legIndex].transform.localRotation = Quaternion.Euler(
-                swingAngle * Mathf.Rad2Deg,
-                0,
-                0
-            );
-
-            lowerLegs[legIndex].transform.localRotation = Quaternion.Euler(
-                -swingAngle * Mathf.Rad2Deg * 2,
-                0,
-                0
-            );
-
-            // Apply lift
-            legs[legIndex].transform.localPosition = new Vector3(
-                legs[legIndex].transform.localPosition.x,
-                liftHeight,
-                legs[legIndex].transform.localPosition.z
-            );
-        }
-        else
-        {
-            // Grounded and pushing (normalized 0 to 1 for this motion)
-            float groundPhase = (phase - 0.5f) * 2f;
-
-            // Reverse motion on the ground (pushing backward)
-            float swingAngle = Mathf.Lerp(-30f, 30f, groundPhase) * Mathf.Deg2Rad;
-
-            // Apply rotations to upper and lower leg joints
-            upperLegs[legIndex].transform.localRotation = Quaternion.Euler(
-                swingAngle * Mathf.Rad2Deg,
-                0,
-                0
-            );
-
-            lowerLegs[legIndex].transform.localRotation = Quaternion.Euler(
-                -swingAngle * Mathf.Rad2Deg * 1.5f,
-                0,
-                0
-            );
-
-            // Ensure leg is on the ground
-            legs[legIndex].transform.localPosition = new Vector3(
-                legs[legIndex].transform.localPosition.x,
-                0,
-                legs[legIndex].transform.localPosition.z
-            );
-        }
-    }
-
-    // Update child transforms based on global variables
-    void UpdateChildTransforms()
-    {
-        // This ensures all movement is based on the global position and rotation
-        // to prevent potential glitches as requested
-        transform.position = GlobalPosition;
-        transform.rotation = GlobalRotation;
     }
 }
