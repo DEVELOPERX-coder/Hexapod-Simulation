@@ -1,7 +1,7 @@
 using UnityEngine;
 
 /// <summary>
-/// Controls a single leg of a hexapod robot, handling IK and positioning
+/// Controls a single leg of a hexapod with proper orientation handling
 /// </summary>
 public class HexapodLeg : MonoBehaviour
 {
@@ -11,18 +11,44 @@ public class HexapodLeg : MonoBehaviour
     public Transform tibia;
 
     [Header("Leg Movement Parameters")]
-    public float hipRotationLimit = 45f;
-    public float femurRotationLimit = 90f;
-    public float tibiaRotationLimit = 135f;
+    [Tooltip("Minimum angle for hip rotation (usually negative)")]
+    public float hipRotationLimitMin = -60f;
+    [Tooltip("Maximum angle for hip rotation (usually positive)")]
+    public float hipRotationLimitMax = 60f;
+    [Tooltip("Minimum angle for femur rotation (usually negative)")]
+    public float femurRotationLimitMin = -90f;
+    [Tooltip("Maximum angle for femur rotation (usually positive)")]
+    public float femurRotationLimitMax = 90f;
+    [Tooltip("Minimum angle for tibia rotation (usually negative)")]
+    public float tibiaRotationLimitMin = -120f;
+    [Tooltip("Maximum angle for tibia rotation (usually 0 or slightly positive)")]
+    public float tibiaRotationLimitMax = 0f;
 
     [Header("IK Settings")]
     public Transform footTarget;
-    public float femurLength = 0.3f;
-    public float tibiaLength = 0.4f;
+    public float femurLength = 0.45f;
+    public float tibiaLength = 0.65f;
     public float groundClearance = 0.05f;
+
+    [Header("Debug")]
+    public bool debugDraw = false;
 
     private Vector3 defaultFootPosition;
     private bool setupComplete = false;
+    private bool isRightSide; // Determines if this is a right or left leg
+
+    void Awake()
+    {
+        // Determine if this is a right or left leg based on name or position
+        string legName = gameObject.name.ToLower();
+        isRightSide = legName.Contains("_r") || legName.Contains("right");
+
+        // If we couldn't determine from name, use position
+        if (transform.localPosition.x > 0)
+            isRightSide = true;
+        else if (transform.localPosition.x < 0)
+            isRightSide = false;
+    }
 
     void Start()
     {
@@ -34,6 +60,13 @@ public class HexapodLeg : MonoBehaviour
     /// </summary>
     public void SetupLeg()
     {
+        // Make sure we have all the joints
+        if (hip == null || femur == null || tibia == null)
+        {
+            Debug.LogError("Leg joints not properly assigned on " + gameObject.name);
+            return;
+        }
+
         // If footTarget isn't assigned, create one
         if (footTarget == null)
         {
@@ -41,15 +74,9 @@ public class HexapodLeg : MonoBehaviour
             footTarget = target.transform;
             footTarget.SetParent(transform);
 
-            // Position it at the end of the leg chain
-            if (tibia != null)
-            {
-                footTarget.position = tibia.position + Vector3.down * tibiaLength;
-            }
-            else
-            {
-                footTarget.localPosition = new Vector3(0, -femurLength - tibiaLength, 0);
-            }
+            // Position the foot target at the end of the tibia
+            Vector3 footPos = tibia.position + (Vector3.down * tibiaLength);
+            footTarget.position = footPos;
         }
 
         // Store the default foot position in local space
@@ -65,6 +92,7 @@ public class HexapodLeg : MonoBehaviour
         if (!setupComplete)
         {
             SetupLeg();
+            return;
         }
 
         // Solve the IK for the leg
@@ -73,6 +101,7 @@ public class HexapodLeg : MonoBehaviour
 
     /// <summary>
     /// Solves inverse kinematics for the leg to reach the foot target
+    /// Improved version with correct orientation handling
     /// </summary>
     public void SolveIK()
     {
@@ -84,50 +113,94 @@ public class HexapodLeg : MonoBehaviour
 
         try
         {
-            // Get the target position in local space of the hip joint
-            Vector3 hipPos = hip.position;
+            // IMPORTANT: We need to handle the leg orientation correctly
+            // For a right leg: Positive hip angle rotates toward body center
+            // For a left leg: Positive hip angle rotates away from body center
+
+            // 1. Get the target position in local space relative to the leg root
+            Vector3 rootPos = transform.position;
             Vector3 targetPos = footTarget.position;
+            Vector3 targetVec = targetPos - rootPos;
 
-            // Calculate the direction from hip to target
-            Vector3 targetDir = targetPos - hipPos;
+            // 2. Calculate hip rotation (horizontal plane rotation)
+            // Project target vector onto the horizontal plane
+            Vector3 targetHorizontal = new Vector3(targetVec.x, 0, targetVec.z);
 
-            // 1. First, rotate the hip joint to point towards the target in the horizontal plane
-            float hipAngle = Mathf.Atan2(targetDir.x, targetDir.z) * Mathf.Rad2Deg;
+            // Calculate the desired hip angle
+            float hipAngle = Mathf.Atan2(targetHorizontal.x, targetHorizontal.z) * Mathf.Rad2Deg;
+
+            // Apply side-specific logic
+            if (!isRightSide)
+            {
+                // For left legs, we need to adjust the angle calculation
+                // Left legs have mirrored coordinate systems
+                hipAngle = Mathf.Atan2(-targetHorizontal.x, targetHorizontal.z) * Mathf.Rad2Deg;
+            }
+
+            // Clamp the hip rotation to valid limits
+            hipAngle = Mathf.Clamp(hipAngle, hipRotationLimitMin, hipRotationLimitMax);
+
+            // Apply the hip rotation - this only rotates around the Y axis
             hip.localRotation = Quaternion.Euler(0, hipAngle, 0);
 
-            // Get the new forward direction after hip rotation
-            Vector3 hipForward = hip.forward;
+            // 3. Calculate femur and tibia rotations after hip rotation is applied
+            // We need the target in the femur's parent space (hip joint)
+            Vector3 targetFromHip = hip.InverseTransformPoint(targetPos);
 
-            // Project the target onto the plane defined by the hip forward direction
-            float targetDistance = Vector3.Project(targetDir, hipForward).magnitude;
+            // Adjust for left/right side coordinate systems if needed
+            if (!isRightSide)
+            {
+                // Mirror the X coordinate to handle left-side legs properly
+                targetFromHip.x = -targetFromHip.x;
+            }
 
-            // Get the height difference
-            float heightDiff = targetPos.y - hipPos.y;
+            // Get the 2D distance in the Y-Z plane (after accounting for hip rotation)
+            float targetDistanceYZ = new Vector2(targetFromHip.y, targetFromHip.z).magnitude;
 
-            // 2. Calculate the knee and ankle angles using two-bone IK
-            float targetDistanceSqr = targetDistance * targetDistance + heightDiff * heightDiff;
-            float targetDistanceFromHip = Mathf.Sqrt(targetDistanceSqr);
+            // Clamp the distance to what's physically reachable
+            float maxReach = femurLength + tibiaLength;
+            targetDistanceYZ = Mathf.Clamp(targetDistanceYZ, 0.01f, maxReach - 0.01f);
 
-            // Clamp the target distance to the possible range
-            targetDistanceFromHip = Mathf.Clamp(targetDistanceFromHip, 0.01f, femurLength + tibiaLength - 0.01f);
+            // Use the law of cosines to calculate knee (tibia) angle
+            float cosKneeAngle = (femurLength * femurLength + tibiaLength * tibiaLength - targetDistanceYZ * targetDistanceYZ) /
+                               (2 * femurLength * tibiaLength);
 
-            // Use the law of cosines to find the angles
-            float cosKneeAngle = (femurLength * femurLength + tibiaLength * tibiaLength - targetDistanceSqr) / (2f * femurLength * tibiaLength);
-            cosKneeAngle = Mathf.Clamp(cosKneeAngle, -1f, 1f); // Ensure the value is valid for acos
-            float kneeAngle = Mathf.Acos(cosKneeAngle) * Mathf.Rad2Deg;
+            // Ensure valid range for arc cosine
+            cosKneeAngle = Mathf.Clamp(cosKneeAngle, -1f, 1f);
 
-            // Calculate the femur angle relative to horizontal
-            float cosFemurAngle = (femurLength * femurLength + targetDistanceSqr - tibiaLength * tibiaLength) / (2f * femurLength * targetDistanceFromHip);
+            // Calculate knee angle (negative because knee bends backward)
+            float kneeAngle = -Mathf.Acos(cosKneeAngle) * Mathf.Rad2Deg;
+
+            // Calculate angle of femur relative to local Y axis
+            float cosFemurAngle = (femurLength * femurLength + targetDistanceYZ * targetDistanceYZ - tibiaLength * tibiaLength) /
+                                (2 * femurLength * targetDistanceYZ);
+
+            // Ensure valid range for arc cosine  
             cosFemurAngle = Mathf.Clamp(cosFemurAngle, -1f, 1f);
+
+            // Calculate femur angle
             float femurAngle = Mathf.Acos(cosFemurAngle) * Mathf.Rad2Deg;
 
-            // Adjust for height difference
-            float femurPitchOffset = Mathf.Atan2(heightDiff, targetDistance) * Mathf.Rad2Deg;
-            femurAngle += femurPitchOffset;
+            // Adjust for the target's height relative to hip
+            float targetHeightAngle = Mathf.Atan2(targetFromHip.y, targetFromHip.z) * Mathf.Rad2Deg;
+            femurAngle = targetHeightAngle + femurAngle;
 
-            // 3. Apply the rotations to the joints
+            // Ensure knee angle is within limits
+            kneeAngle = Mathf.Clamp(kneeAngle, tibiaRotationLimitMin, tibiaRotationLimitMax);
+
+            // Ensure femur angle is within limits
+            femurAngle = Mathf.Clamp(femurAngle, femurRotationLimitMin, femurRotationLimitMax);
+
+            // Apply the calculated angles
             femur.localRotation = Quaternion.Euler(femurAngle, 0, 0);
-            tibia.localRotation = Quaternion.Euler(-kneeAngle, 0, 0);
+            tibia.localRotation = Quaternion.Euler(kneeAngle, 0, 0);
+
+            if (debugDraw)
+            {
+                Debug.DrawLine(hip.position, femur.position, Color.red);
+                Debug.DrawLine(femur.position, tibia.position, Color.green);
+                Debug.DrawLine(tibia.position, footTarget.position, Color.blue);
+            }
         }
         catch (System.Exception e)
         {
@@ -142,8 +215,7 @@ public class HexapodLeg : MonoBehaviour
     {
         if (footTarget != null)
         {
-            Vector3 worldPosition = transform.TransformPoint(localPosition);
-            footTarget.position = worldPosition;
+            footTarget.position = transform.TransformPoint(localPosition);
         }
     }
 
@@ -160,6 +232,9 @@ public class HexapodLeg : MonoBehaviour
     /// </summary>
     public void AdaptToGround()
     {
+        if (footTarget == null)
+            return;
+
         RaycastHit hit;
         // Start the ray from above the foot
         Vector3 rayStart = footTarget.position + Vector3.up * 0.5f;
@@ -198,6 +273,14 @@ public class HexapodLeg : MonoBehaviour
                 // Draw the foot target
                 Gizmos.color = Color.red;
                 Gizmos.DrawSphere(footTarget.position, 0.02f);
+
+                // Draw the default foot position
+                if (debugDraw)
+                {
+                    Gizmos.color = Color.yellow;
+                    Vector3 defaultPos = transform.TransformPoint(defaultFootPosition);
+                    Gizmos.DrawSphere(defaultPos, 0.015f);
+                }
             }
         }
     }
